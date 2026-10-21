@@ -4,6 +4,10 @@ import android.app.*
 import android.os.*
 import android.content.*
 import android.graphics.Color
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.util.LruCache
+import android.text.TextUtils
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.net.Uri
@@ -16,13 +20,20 @@ import java.util.zip.*
 import kotlin.concurrent.thread
 
 class MainActivity : Activity() {
-    private val bg = Color.rgb(9, 16, 35)
-    private val panel = Color.rgb(23, 34, 62)
-    private val fg = Color.rgb(237, 243, 255)
-    private val muted = Color.rgb(157, 178, 208)
-    private val accent = Color.rgb(105, 125, 247)
+    private val bg = Color.rgb(22, 34, 56)
+    private val panel = Color.rgb(32, 49, 77)
+    private val fg = Color.rgb(238, 247, 255)
+    private val muted = Color.rgb(164, 188, 207)
+    private val accent = Color.rgb(32, 163, 190)
     private lateinit var root: LinearLayout
     private lateinit var list: LinearLayout
+    private lateinit var scroller: ScrollView
+    private var gridMode = false
+    private var filterMode = 0
+    private val thumbnailCache = object : LruCache<String, Bitmap>(48) {}
+    private val thumbWorkers = java.util.concurrent.Executors.newFixedThreadPool(3)
+    private val favoriteIds = linkedSetOf<String>()
+    private val recentIds = mutableListOf<String>()
     private lateinit var heading: TextView
     private lateinit var status: TextView
     private lateinit var search: EditText
@@ -49,15 +60,18 @@ class MainActivity : Activity() {
         if (saved != null) {
             try { tree = Uri.parse(saved); current = rootDoc(tree!!); queryName(current!!) } catch (_: Exception) { tree = null; current = null }
         }
+        favoriteIds.addAll(getPreferences(MODE_PRIVATE).getString("favorites", "")!!.split("\n").filter { it.isNotBlank() })
+        recentIds.addAll(getPreferences(MODE_PRIVATE).getString("recent", "")!!.split("\n").filter { it.isNotBlank() })
         draw()
     }
     private fun shape(color: Int, radius: Float = 18f): GradientDrawable = GradientDrawable().apply { setColor(color); cornerRadius = radius * resources.displayMetrics.density }
+    private fun aurora(): GradientDrawable = GradientDrawable(GradientDrawable.Orientation.TL_BR, intArrayOf(Color.rgb(23, 37, 61), Color.rgb(37, 42, 77), Color.rgb(19, 63, 78)))
     private fun dp(n: Int) = (n * resources.displayMetrics.density).toInt()
     private fun label(s: String, size: Float = 15f, color: Int = fg, bold: Boolean = false) = TextView(this).apply {
         text = s; textSize = size; setTextColor(color); if (bold) setTypeface(null, Typeface.BOLD); setPadding(dp(5), dp(7), dp(5), dp(7))
     }
     private fun button(text: String, action: () -> Unit): TextView = label(text, 13f, fg, true).apply {
-        gravity = Gravity.CENTER; background = shape(panel); setPadding(dp(13), dp(11), dp(13), dp(11))
+        gravity = Gravity.CENTER; background = GradientDrawable(GradientDrawable.Orientation.LEFT_RIGHT, intArrayOf(Color.rgb(42, 119, 194), Color.rgb(28, 167, 184))).apply { cornerRadius = dp(13).toFloat() }; setPadding(dp(9), dp(10), dp(9), dp(10))
         setOnClickListener { if (!busy) { animate().alpha(.6f).setDuration(90).withEndAction { animate().alpha(1f).setDuration(140).start(); action() }.start() } }
     }
     private fun horizontal(vararg buttons: TextView): LinearLayout = LinearLayout(this).apply {
@@ -65,10 +79,10 @@ class MainActivity : Activity() {
         for (b in buttons) addView(b, LinearLayout.LayoutParams(0, -2, 1f).apply { setMargins(dp(2), dp(3), dp(2), dp(3)) })
     }
     private fun draw() {
-        root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setBackgroundColor(bg); setPadding(dp(12), dp(8), dp(12), dp(8)) }
+        root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; background = aurora(); setPadding(dp(12), dp(8), dp(12), dp(8)) }
         setContentView(root)
-        root.addView(label("V  /  FILE MANAGER", 21f, fg, true))
-        root.addView(label("MIDNIGHT AURORA  •  v0.2.0", 11f, muted))
+        root.addView(label("▱  V File Manager", 21f, fg, true))
+        root.addView(label("V APPLICATIONS  •  v0.3.0", 11f, Color.rgb(137, 223, 239)))
         root.addView(horizontal(button("选择文件夹") { chooseTree() }, button("返回上级") { goUp() }, button("刷新") { refresh() }))
         heading = label("尚未授权文件夹", 14f, fg, true); root.addView(heading)
         search = EditText(this).apply {
@@ -81,13 +95,15 @@ class MainActivity : Activity() {
             })
         }
         root.addView(search)
-        root.addView(horizontal(button("排序：名称/大小/日期") { sortMode = (sortMode + 1) % 3; showEntries() }, button("新建文件夹") { prompt("文件夹名称") { name -> operation { createFolder(name) } } }))
+        root.addView(horizontal(button("排序") { sortMode = (sortMode + 1) % 3; showEntries() }, button("筛选") { filterMode = (filterMode + 1) % 5; showEntries(); toast("筛选：" + listOf("全部", "图片", "视频", "音频", "文档")[filterMode]) }, button("列表 / 网格") { gridMode = !gridMode; showEntries() }, button("新建文件夹") { prompt("文件夹名称") { name -> operation { createFolder(name) } } }))
+        root.addView(horizontal(button("收藏 / 取消收藏") { toggleFavorite() }, button("收藏夹") { showQuickList(true) }, button("最近访问") { showQuickList(false) }))
         root.addView(horizontal(button("多选 / 完成") { multiMode = !multiMode; if (!multiMode) multi.clear(); showEntries(); updateSelectionStatus() }, button("全选") { multiMode = true; multi.addAll(rowCache.filter { it.second.name.contains(search.text.toString(), true) }.map { it.first }); showEntries(); updateSelectionStatus() }, button("清空选择") { multi.clear(); selected = null; showEntries(); updateSelectionStatus() }))
         val scroll = ScrollView(this).apply { isFillViewport = true }
+        scroller = scroll
         list = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(0, dp(4), 0, dp(8)) }
         scroll.addView(list)
         root.addView(scroll, LinearLayout.LayoutParams(-1, 0, 1f))
-        root.addView(label("点击「多选」批量选择；长按可快速选中", 12f, muted))
+        root.addView(label("长按多选 · 点击文件可预览 · 通过系统授权访问文件", 11f, muted))
         root.addView(horizontal(button("分享 / 转发") { shareSelected() }, button("查看 / 编辑") { viewSelected() }, button("选择信息") { selectionInfo() }))
         root.addView(horizontal(button("详情") { details() }, button("重命名") { rename() }, button("删除") { deleteSelected() }))
         root.addView(horizontal(button("复制") { copy(false) }, button("剪切") { copy(true) }, button("粘贴到此处") { paste() }))
@@ -105,7 +121,7 @@ class MainActivity : Activity() {
             val uri = data?.data ?: return
             try {
                 contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
-                tree = uri; current = rootDoc(uri); selected = null; multi.clear(); multi.clear(); multi.clear()
+                tree = uri; current = rootDoc(uri); selected = null; multi.clear()
                 getPreferences(MODE_PRIVATE).edit().putString("tree", uri.toString()).apply()
                 refresh()
             } catch (e: Exception) { error(e) }
@@ -155,30 +171,137 @@ class MainActivity : Activity() {
     private fun updateSelectionStatus() {
         if (::status.isInitialized) status.text = "${entries.size} 个项目 · 已选 ${if (multi.isNotEmpty()) multi.size else if (selected != null) 1 else 0} 项"
     }
+    private fun matchesFilter(meta: Info): Boolean {
+        if (meta.mime == DocumentsContract.Document.MIME_TYPE_DIR) return true
+        val mime = meta.mime.lowercase(Locale.ROOT)
+        return when (filterMode) {
+            1 -> mime.startsWith("image/")
+            2 -> mime.startsWith("video/")
+            3 -> mime.startsWith("audio/")
+            4 -> mime.startsWith("text/") || mime.contains("pdf") || meta.name.substringAfterLast('.', "").lowercase(Locale.ROOT) in setOf("kt", "java", "py", "js", "json", "xml", "md", "html", "txt", "csv")
+            else -> true
+        }
+    }
     private fun showEntries() {
         if (!::list.isInitialized) return
         list.removeAllViews()
         val q = if (::search.isInitialized) search.text.toString().trim().lowercase(Locale.ROOT) else ""
-        val ordered = rowCache.filter { it.second.name.lowercase(Locale.ROOT).contains(q) }
+        val ordered = rowCache.filter { it.second.name.lowercase(Locale.ROOT).contains(q) && matchesFilter(it.second) }
             .sortedWith(compareBy<Pair<Uri, Info>> { it.second.mime != DocumentsContract.Document.MIME_TYPE_DIR }.thenComparator { a, b ->
                 when (sortMode) { 1 -> b.second.size.compareTo(a.second.size); 2 -> b.second.modified.compareTo(a.second.modified); else -> a.second.name.compareTo(b.second.name, ignoreCase = true) }
             })
+        val widthDp = resources.configuration.screenWidthDp
+        val columns = if (!gridMode) 1 else if (widthDp >= 700) 5 else if (widthDp >= 420) 3 else 2
+        val grid = if (gridMode) android.widget.GridLayout(this).apply { columnCount = columns } else null
+        if (grid != null) list.addView(grid)
+        val cellWidth = (widthDp - 30) / columns - 8
         for ((uri, meta) in ordered) {
             val folder = meta.mime == DocumentsContract.Document.MIME_TYPE_DIR
             val checked = uri in multi || (multi.isEmpty() && uri == selected)
-            val prefix = if (multiMode) (if (uri in multi) "☑  " else "☐  ") else (if (folder) "📁  " else "📄  ")
-            val row = label(prefix + meta.name + (if (folder) "" else "\n      ${formatSize(meta.size)}"), 15f, fg)
-            row.background = shape(if (checked) accent else panel)
-            row.setPadding(dp(13), dp(10), dp(13), dp(10))
+            val row = LinearLayout(this).apply { orientation = if (gridMode) LinearLayout.VERTICAL else LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; background = shape(if (checked) accent else panel); setPadding(dp(9), dp(8), dp(9), dp(8)) }
+            val glyph = label(if (multiMode) (if (uri in multi) "☑" else "☐") else if (folder) "▱" else "▤", if (gridMode) 27f else 23f, Color.rgb(147, 230, 243), true)
+            glyph.gravity = Gravity.CENTER
+            val thumb = ImageView(this).apply { scaleType = ImageView.ScaleType.CENTER_CROP; visibility = View.GONE }
+            val name = label(meta.name + (if (folder) "" else "\n${formatSize(meta.size)}"), if (gridMode) 12f else 14f, fg)
+            name.maxLines = if (gridMode) 3 else 2; name.ellipsize = TextUtils.TruncateAt.END
+            if (gridMode) {
+                row.addView(glyph, LinearLayout.LayoutParams(-1, dp(48)))
+                row.addView(thumb, LinearLayout.LayoutParams(-1, dp(65)))
+                row.addView(name, LinearLayout.LayoutParams(-1, dp(65)))
+            } else {
+                row.addView(glyph, LinearLayout.LayoutParams(dp(48), dp(55)))
+                row.addView(thumb, LinearLayout.LayoutParams(dp(52), dp(52)))
+                row.addView(name, LinearLayout.LayoutParams(0, -2, 1f))
+            }
+            if (!folder && meta.mime.startsWith("image/") && meta.size in 1..(15L * 1024 * 1024)) loadThumbnail(uri, thumb, glyph)
             row.setOnClickListener {
                 if (multiMode) { if (!multi.add(uri)) multi.remove(uri); selected = null; showEntries(); updateSelectionStatus() }
                 else if (folder) { current = uri; selected = null; multi.clear(); search.setText(""); refresh() }
-                else openFile(uri)
+                else { selected = uri; trackRecent(uri); previewFile(uri, meta) }
             }
             row.setOnLongClickListener { multiMode = true; multi.add(uri); selected = null; showEntries(); updateSelectionStatus(); true }
-            list.addView(row, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(5) })
+            if (grid != null) grid.addView(row, android.widget.GridLayout.LayoutParams().apply { width = dp(cellWidth); height = -2; setMargins(dp(3), dp(3), dp(3), dp(3)) })
+            else list.addView(row, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(5) })
         }
         if (ordered.isEmpty()) list.addView(label("这里没有匹配的文件", 14f, muted))
+    }
+    private fun loadThumbnail(uri: Uri, image: ImageView, glyph: TextView) {
+        val key = uri.toString()
+        val cached = thumbnailCache.get(key)
+        if (cached != null) { image.setImageBitmap(cached); image.visibility = View.VISIBLE; glyph.visibility = View.GONE; return }
+        image.tag = key
+        thumbWorkers.execute {
+            val bitmap = try {
+                contentResolver.openInputStream(uri)?.use { stream ->
+                    val bytes = stream.readBytesLimited(15 * 1024 * 1024)
+                    val options = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                    BitmapFactory.decodeByteArray(bytes, 0, bytes.size, options)
+                    options.inSampleSize = maxOf(1, maxOf(options.outWidth, options.outHeight) / 160)
+                    options.inJustDecodeBounds = false
+                    BitmapFactory.decodeByteArray(bytes, 0, bytes.size, options)
+                }
+            } catch (_: Exception) { null }
+            if (bitmap != null) runOnUiThread {
+                thumbnailCache.put(key, bitmap)
+                if (image.tag == key && image.parent != null) { image.setImageBitmap(bitmap); image.visibility = View.VISIBLE; glyph.visibility = View.GONE }
+            }
+        }
+    }
+    override fun onDestroy() { thumbWorkers.shutdownNow(); super.onDestroy() }
+    private fun InputStream.readBytesLimited(limit: Int): ByteArray {
+        val out = ByteArrayOutputStream()
+        val buffer = ByteArray(8192)
+        while (true) { val n = read(buffer); if (n < 0) break; if (out.size() + n > limit) throw IOException("文件太大"); out.write(buffer, 0, n) }
+        return out.toByteArray()
+    }
+    private fun trackRecent(uri: Uri) {
+        val key = uri.toString(); recentIds.remove(key); recentIds.add(0, key)
+        while (recentIds.size > 30) recentIds.removeAt(recentIds.lastIndex)
+        getPreferences(MODE_PRIVATE).edit().putString("recent", recentIds.joinToString("\n")).apply()
+    }
+    private fun toggleFavorite() {
+        val uri = chosen() ?: return
+        val key = uri.toString()
+        if (!favoriteIds.add(key)) favoriteIds.remove(key)
+        getPreferences(MODE_PRIVATE).edit().putString("favorites", favoriteIds.joinToString("\n")).apply()
+        toast(if (key in favoriteIds) "已收藏" else "已取消收藏")
+    }
+    private fun showQuickList(favorites: Boolean) {
+        val saved = if (favorites) favoriteIds.toList() else recentIds.toList()
+        if (saved.isEmpty()) { toast("暂无记录"); return }
+        thread {
+            val rows = saved.mapNotNull { key -> try { val uri = Uri.parse(key); uri to info(uri) } catch (_: Exception) { null } }
+            runOnUiThread {
+                if (rows.isEmpty()) { toast("记录中的文件可能已被删除或权限失效"); return@runOnUiThread }
+                AlertDialog.Builder(this).setTitle(if (favorites) "收藏夹" else "最近访问")
+                    .setItems(rows.map { it.second.name }.toTypedArray()) { _, index ->
+                        val (uri, meta) = rows[index]
+                        if (meta.mime == DocumentsContract.Document.MIME_TYPE_DIR) { current = uri; search.setText(""); refresh() }
+                        else { selected = uri; trackRecent(uri); previewFile(uri, meta) }
+                    }.setNegativeButton("关闭", null).show()
+            }
+        }
+    }
+    private fun previewFile(uri: Uri, meta: Info) {
+        if (meta.mime.startsWith("image/")) {
+            thread {
+                val bmp = try { contentResolver.openInputStream(uri)?.use { stream ->
+                    val bytes = stream.readBytesLimited(24 * 1024 * 1024)
+                    val options = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                    BitmapFactory.decodeByteArray(bytes, 0, bytes.size, options)
+                    options.inSampleSize = maxOf(1, maxOf(options.outWidth, options.outHeight) / 1600)
+                    options.inJustDecodeBounds = false
+                    BitmapFactory.decodeByteArray(bytes, 0, bytes.size, options)
+                } } catch (_: Exception) { null }
+                runOnUiThread {
+                    if (bmp == null) { openFile(uri); return@runOnUiThread }
+                    val image = ImageView(this).apply { setImageBitmap(bmp); adjustViewBounds = true; scaleType = ImageView.ScaleType.FIT_CENTER }
+                    val wrapper = ScrollView(this).apply { setPadding(dp(12), dp(8), dp(12), dp(8)); addView(image) }
+                    AlertDialog.Builder(this).setTitle(meta.name).setView(wrapper).setNegativeButton("关闭", null).setPositiveButton("外部打开") { _, _ -> openFile(uri) }.show()
+                }
+            }
+        } else if (meta.mime.startsWith("text/") || meta.name.substringAfterLast('.', "").lowercase(Locale.ROOT) in setOf("txt", "md", "json", "xml", "kt", "java", "py", "js", "html", "css", "csv")) viewSelected()
+        else openFile(uri)
     }
     private fun formatSize(n: Long): String = if (n < 1024) "$n B" else if (n < 1048576) "%.1f KB".format(Locale.US, n / 1024.0) else "%.1f MB".format(Locale.US, n / 1048576.0)
     private fun openFile(uri: Uri) {
@@ -214,7 +337,7 @@ class MainActivity : Activity() {
     }
     private fun viewSelected() {
         val uri = chosen() ?: return
-        val meta = rowCache.firstOrNull { it.first == uri }?.second ?: run { toast("请刷新文件夹"); return }
+        val meta = rowCache.firstOrNull { it.first == uri }?.second ?: try { info(uri) } catch (_: Exception) { toast("文件权限已失效"); return }
         if (meta.mime == DocumentsContract.Document.MIME_TYPE_DIR) { toast("请选择一个文件"); return }
         if (meta.size > 1024 * 1024) { toast("内置文本查看限 1 MB，大文件请直接点击打开"); return }
         thread {
