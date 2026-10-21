@@ -1,11 +1,22 @@
-# V File Manager v0.1.0
+# V File Manager v0.2.0
 
-Native Kotlin Android file manager, Android 8.0+ (API 26). Uses Storage Access Framework: choose a folder to grant access, no broad storage permission.
+Native Kotlin Android file manager, API 26+. Midnight Aurora theme.
 
-Features: folder navigation, name search, sort, create folder, rename, delete, details, copy/move with destination selection, ZIP compress/extract. Long-press an item to select it; action buttons appear below the list. Tap a file to open with another app. ZIP extraction rejects path traversal and has safety limits.
+## Improvements
+- Custom adaptive launcher icon
+- Multi-selection (tap Multi-select, then tap items), select all and clear
+- Batch copy, cut, paste, delete and ZIP compression
+- Android Sharesheet file forwarding (multiple files)
+- Text/code file viewer and editor (UTF-8, max 1 MB; make backups before editing)
+- Background document listing to reduce UI stalls; metadata cached per folder
+- Search, sorting, rename, details, new folder, ZIP extract
+
+## Limitations
+- Android Storage Access Framework grants access only to user-selected folders. Some protected folders are unavailable.
+- No native source-code compilation/runtime is included. Use external IDE/compiler apps.
+- Large directory UI still creates rows eagerly; virtualization and pagination are future work.
+- ZIP operations may be slow on providers with high latency; extraction limited to 512 MB and 5000 entries.
+- Not all providers support overwrite, rename or move. Always test on expendable files first.
 
 ## Build
-Push all files (including `.github`) to a GitHub repository, open Actions > Build V File Manager APK, download artifact. Or run `gradle :app:assembleDebug` with JDK 17 and Android SDK 35.
-
-## Important
-Some Android document providers may refuse operations. Moving is implemented as copy then delete and can take time. ZIP creation and extraction are best used for modest files/folders. The SAF folder picker may restrict system-managed folders. GitHub Actions debug APK signatures are not stable across fresh build environments; configure release signing for future updates.
+Push to GitHub and run Actions workflow; artifact contains debug APK.

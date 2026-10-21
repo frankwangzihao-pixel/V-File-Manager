@@ -29,7 +29,22 @@ class MainActivity : Activity() {
     private var tree: Uri? = null
     private var current: Uri? = null
     private var selected: Uri? = null
+    private val multi = linkedSetOf<Uri>()
+    private var multiMode = false
+    private var refreshToken = 0
+    private var rowCache: List<Pair<Uri, Info>> = emptyList()
+    private val multi = linkedSetOf<Uri>()
+    private var multiMode = false
+    private var refreshToken = 0
+    private var rowCache: List<Pair<Uri, Info>> = emptyList()
+    private val multi = linkedSetOf<Uri>()
+    private var multiMode = false
+    private var refreshToken = 0
+    private var rowCache: List<Pair<Uri, Info>> = emptyList()
     private var clipboard: Uri? = null
+    private var clipboardItems: List<Uri> = emptyList()
+    private var clipboardItems: List<Uri> = emptyList()
+    private var clipboardItems: List<Uri> = emptyList()
     private var cut = false
     private var sortMode = 0
     private var entries: List<Uri> = emptyList()
@@ -63,7 +78,7 @@ class MainActivity : Activity() {
         root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setBackgroundColor(bg); setPadding(dp(12), dp(8), dp(12), dp(8)) }
         setContentView(root)
         root.addView(label("V  /  FILE MANAGER", 21f, fg, true))
-        root.addView(label("MIDNIGHT AURORA  •  v0.1.0", 11f, muted))
+        root.addView(label("MIDNIGHT AURORA  •  v0.2.0", 11f, muted))
         root.addView(horizontal(button("选择文件夹") { chooseTree() }, button("返回上级") { goUp() }, button("刷新") { refresh() }))
         heading = label("尚未授权文件夹", 14f, fg, true); root.addView(heading)
         search = EditText(this).apply {
@@ -77,11 +92,15 @@ class MainActivity : Activity() {
         }
         root.addView(search)
         root.addView(horizontal(button("排序：名称/大小/日期") { sortMode = (sortMode + 1) % 3; showEntries() }, button("新建文件夹") { prompt("文件夹名称") { name -> operation { createFolder(name) } } }))
+        root.addView(horizontal(button("多选 / 完成") { multiMode = !multiMode; if (!multiMode) multi.clear(); showEntries(); updateSelectionStatus() }, button("全选") { multiMode = true; multi.addAll(rowCache.filter { it.second.name.contains(search.text.toString(), true) }.map { it.first }); showEntries(); updateSelectionStatus() }, button("清空选择") { multi.clear(); selected = null; showEntries(); updateSelectionStatus() }))
+        root.addView(horizontal(button("多选 / 完成") { multiMode = !multiMode; if (!multiMode) multi.clear(); showEntries(); updateSelectionStatus() }, button("全选") { multiMode = true; multi.addAll(rowCache.filter { it.second.name.contains(search.text.toString(), true) }.map { it.first }); showEntries(); updateSelectionStatus() }, button("清空选择") { multi.clear(); selected = null; showEntries(); updateSelectionStatus() }))
+        root.addView(horizontal(button("多选 / 完成") { multiMode = !multiMode; if (!multiMode) multi.clear(); showEntries(); updateSelectionStatus() }, button("全选") { multiMode = true; multi.addAll(rowCache.filter { it.second.name.contains(search.text.toString(), true) }.map { it.first }); showEntries(); updateSelectionStatus() }, button("清空选择") { multi.clear(); selected = null; showEntries(); updateSelectionStatus() }))
         val scroll = ScrollView(this).apply { isFillViewport = true }
         list = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(0, dp(4), 0, dp(8)) }
         scroll.addView(list)
         root.addView(scroll, LinearLayout.LayoutParams(-1, 0, 1f))
-        root.addView(label("长按文件或文件夹以选中，再使用下方操作", 12f, muted))
+        root.addView(label("点击「多选」批量选择；长按可快速选中", 12f, muted))
+        root.addView(horizontal(button("分享 / 转发") { shareSelected() }, button("查看 / 编辑") { viewSelected() }, button("选择信息") { selectionInfo() }))
         root.addView(horizontal(button("详情") { details() }, button("重命名") { rename() }, button("删除") { deleteSelected() }))
         root.addView(horizontal(button("复制") { copy(false) }, button("剪切") { copy(true) }, button("粘贴到此处") { paste() }))
         root.addView(horizontal(button("压缩 ZIP") { compress() }, button("解压 ZIP") { extract() }))
@@ -98,7 +117,7 @@ class MainActivity : Activity() {
             val uri = data?.data ?: return
             try {
                 contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
-                tree = uri; current = rootDoc(uri); selected = null
+                tree = uri; current = rootDoc(uri); selected = null; multi.clear(); multi.clear(); multi.clear()
                 getPreferences(MODE_PRIVATE).edit().putString("tree", uri.toString()).apply()
                 refresh()
             } catch (e: Exception) { error(e) }
@@ -125,29 +144,50 @@ class MainActivity : Activity() {
     private fun refresh() {
         val dir = current
         if (dir == null) { heading.text = "尚未授权文件夹"; list.removeAllViews(); status.text = "请先点击「选择文件夹」"; return }
-        try {
-            heading.text = "📂  ${queryName(dir)}"
-            entries = children(dir)
-            showEntries()
-            status.text = "${entries.size} 个项目" + if (selected != null) "  ·  已选中 ${queryName(selected!!)}" else ""
-        } catch (e: Exception) { error(e) }
+        val token = ++refreshToken
+        status.text = "正在加载文件列表…"
+        thread {
+            val result = try {
+                val title = queryName(dir)
+                val rows = children(dir).mapNotNull { uri -> try { uri to info(uri) } catch (_: Exception) { null } }
+                Triple(title, rows, null as Exception?)
+            } catch (e: Exception) { Triple("", emptyList(), e) }
+            runOnUiThread {
+                if (token != refreshToken || current != dir) return@runOnUiThread
+                if (result.third != null) { error(result.third!!); return@runOnUiThread }
+                heading.text = "📂  ${result.first}"
+                rowCache = result.second
+                entries = rowCache.map { it.first }
+                multi.retainAll(entries.toSet())
+                showEntries()
+                updateSelectionStatus()
+            }
+        }
+    }
+    private fun updateSelectionStatus() {
+        if (::status.isInitialized) status.text = "${entries.size} 个项目 · 已选 ${if (multi.isNotEmpty()) multi.size else if (selected != null) 1 else 0} 项"
     }
     private fun showEntries() {
         if (!::list.isInitialized) return
         list.removeAllViews()
         val q = if (::search.isInitialized) search.text.toString().trim().lowercase(Locale.ROOT) else ""
-        val ordered = try {
-            entries.map { it to info(it) }.filter { it.second.name.lowercase(Locale.ROOT).contains(q) }.sortedWith(compareBy<Pair<Uri, Info>> { it.second.mime != DocumentsContract.Document.MIME_TYPE_DIR }.thenComparator { a, b ->
+        val ordered = rowCache.filter { it.second.name.lowercase(Locale.ROOT).contains(q) }
+            .sortedWith(compareBy<Pair<Uri, Info>> { it.second.mime != DocumentsContract.Document.MIME_TYPE_DIR }.thenComparator { a, b ->
                 when (sortMode) { 1 -> b.second.size.compareTo(a.second.size); 2 -> b.second.modified.compareTo(a.second.modified); else -> a.second.name.compareTo(b.second.name, ignoreCase = true) }
             })
-        } catch (e: Exception) { error(e); return }
         for ((uri, meta) in ordered) {
             val folder = meta.mime == DocumentsContract.Document.MIME_TYPE_DIR
-            val row = label((if (folder) "📁  " else "📄  ") + meta.name + (if (folder) "" else "\n      ${formatSize(meta.size)}"), 15f, if (uri == selected) Color.WHITE else fg)
-            row.background = shape(if (uri == selected) accent else panel)
+            val checked = uri in multi || (multi.isEmpty() && uri == selected)
+            val prefix = if (multiMode) (if (uri in multi) "☑  " else "☐  ") else (if (folder) "📁  " else "📄  ")
+            val row = label(prefix + meta.name + (if (folder) "" else "\n      ${formatSize(meta.size)}"), 15f, fg)
+            row.background = shape(if (checked) accent else panel)
             row.setPadding(dp(13), dp(10), dp(13), dp(10))
-            row.setOnClickListener { if (folder) { current = uri; selected = null; search.setText(""); refresh() } else openFile(uri) }
-            row.setOnLongClickListener { selected = uri; refresh(); true }
+            row.setOnClickListener {
+                if (multiMode) { if (!multi.add(uri)) multi.remove(uri); selected = null; showEntries(); updateSelectionStatus() }
+                else if (folder) { current = uri; selected = null; multi.clear(); search.setText(""); refresh() }
+                else openFile(uri)
+            }
+            row.setOnLongClickListener { multiMode = true; multi.add(uri); selected = null; showEntries(); updateSelectionStatus(); true }
             list.addView(row, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(5) })
         }
         if (ordered.isEmpty()) list.addView(label("这里没有匹配的文件", 14f, muted))
@@ -166,9 +206,41 @@ class MainActivity : Activity() {
         val rootId = DocumentsContract.getTreeDocumentId(tree!!)
         val parent = id.substringBeforeLast('/', rootId)
         current = doc(if (parent.startsWith(rootId)) parent else rootId)
-        selected = null; search.setText(""); refresh()
+        selected = null; multi.clear(); search.setText(""); refresh()
     }
-    private fun chosen(): Uri? = selected.also { if (it == null) toast("请先长按选中一个项目") }
+    private fun chosen(): Uri? = (multi.firstOrNull() ?: selected).also { if (it == null) toast("请先选中项目") }
+    private fun chosenAll(): List<Uri> = if (multi.isNotEmpty()) multi.toList() else listOfNotNull(selected)
+    private fun selectionInfo() { toast("当前已选择 ${chosenAll().size} 项") }
+    private fun shareSelected() {
+        val items = chosenAll().filter { uri -> rowCache.firstOrNull { it.first == uri }?.second?.mime != DocumentsContract.Document.MIME_TYPE_DIR }
+        if (items.isEmpty()) { toast("请先选择要分享的文件（暂不支持直接分享文件夹）"); return }
+        val intent = if (items.size == 1) Intent(Intent.ACTION_SEND).apply {
+            type = rowCache.firstOrNull { it.first == items[0] }?.second?.mime?.takeIf { it.isNotBlank() } ?: "application/octet-stream"
+            putExtra(Intent.EXTRA_STREAM, items[0]); clipData = ClipData.newUri(contentResolver, "file", items[0])
+        } else Intent(Intent.ACTION_SEND_MULTIPLE).apply {
+            type = "*/*"; putParcelableArrayListExtra(Intent.EXTRA_STREAM, ArrayList(items))
+            val clip = ClipData.newUri(contentResolver, "files", items[0]); items.drop(1).forEach { clip.addItem(ClipData.Item(it)) }; clipData = clip
+        }
+        intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        try { startActivity(Intent.createChooser(intent, "分享文件")) } catch (e: Exception) { error(e) }
+    }
+    private fun viewSelected() {
+        val uri = chosen() ?: return
+        val meta = rowCache.firstOrNull { it.first == uri }?.second ?: run { toast("请刷新文件夹"); return }
+        if (meta.mime == DocumentsContract.Document.MIME_TYPE_DIR) { toast("请选择一个文件"); return }
+        if (meta.size > 1024 * 1024) { toast("内置文本查看限 1 MB，大文件请直接点击打开"); return }
+        thread {
+            val result = try { contentResolver.openInputStream(uri)?.bufferedReader(Charsets.UTF_8)?.use { it.readText() } ?: throw IOException("无法读取") } catch (e: Exception) { runOnUiThread { error(e) }; return@thread }
+            runOnUiThread {
+                val editor = EditText(this).apply { setText(result); setTextColor(Color.BLACK); textSize = 13f; setPadding(dp(12), dp(8), dp(12), dp(8)); gravity = Gravity.TOP; minLines = 12; maxLines = 22; setHorizontallyScrolling(true) }
+                val wrapper = ScrollView(this).apply { addView(editor) }
+                AlertDialog.Builder(this).setTitle(meta.name).setView(wrapper).setNegativeButton("关闭", null).setNeutralButton("外部打开") { _, _ -> openFile(uri) }.setPositiveButton("保存修改") { _, _ ->
+                    AlertDialog.Builder(this).setTitle("覆盖文件内容？").setMessage("保存会替换原文件内容，请确保已备份重要文件。")
+                        .setNegativeButton("取消", null).setPositiveButton("确认保存") { _, _ -> operation { contentResolver.openOutputStream(uri, "wt")?.bufferedWriter(Charsets.UTF_8)?.use { it.write(editor.text.toString()) } ?: throw IOException("无法写入文件") } }.show()
+                }.show()
+            }
+        }
+    }
     private fun toast(s: String) = Toast.makeText(this, s, Toast.LENGTH_LONG).show()
     private fun error(e: Exception) { status.text = "失败：${e.message ?: e.javaClass.simpleName}"; toast(status.text.toString()) }
     private fun prompt(title: String, action: (String) -> Unit) {
@@ -184,7 +256,7 @@ class MainActivity : Activity() {
         busy = true; status.text = "正在处理，请稍候…"
         thread {
             val failure = try { job(); null } catch (e: Exception) { e }
-            runOnUiThread { busy = false; selected = null; refresh(); if (failure != null) error(failure) else { status.text = "操作完成"; toast("操作完成") } }
+            runOnUiThread { busy = false; selected = null; multi.clear(); refresh(); if (failure != null) error(failure) else { status.text = "操作完成"; toast("操作完成") } }
         }
     }
     private fun createFolder(name: String) {
@@ -197,22 +269,38 @@ class MainActivity : Activity() {
         prompt("重命名：${queryName(uri)}") { name -> operation { DocumentsContract.renameDocument(contentResolver, uri, name) ?: throw IOException("无法重命名") } }
     }
     private fun deleteSelected() {
-        val uri = chosen() ?: return
-        AlertDialog.Builder(this).setTitle("确认删除？").setMessage(queryName(uri) + "\n此操作可能无法撤销。")
-            .setNegativeButton("取消", null).setPositiveButton("删除") { _, _ -> operation { if (!DocumentsContract.deleteDocument(contentResolver, uri)) throw IOException("删除失败") } }.show()
+        val targets = chosenAll()
+        if (targets.isEmpty()) { toast("请先选择项目"); return }
+        AlertDialog.Builder(this).setTitle("确认删除 ${targets.size} 项？").setMessage("删除操作可能无法撤销，请确认已备份重要文件。")
+            .setNegativeButton("取消", null).setPositiveButton("删除") { _, _ -> operation {
+                for (uri in targets) if (!DocumentsContract.deleteDocument(contentResolver, uri)) throw IOException("删除失败：${queryName(uri)}")
+                multi.clear()
+            } }.show()
     }
     private fun details() {
         val uri = chosen() ?: return
         try { val m = info(uri); AlertDialog.Builder(this).setTitle(m.name).setMessage("类型：${m.mime}\n大小：${formatSize(m.size)}\n修改时间：${if (m.modified > 0) java.text.DateFormat.getDateTimeInstance().format(java.util.Date(m.modified)) else "未知"}\n文档 ID：${m.id}").setPositiveButton("关闭", null).show() } catch (e: Exception) { error(e) }
     }
-    private fun copy(move: Boolean) { clipboard = chosen() ?: return; cut = move; toast(if (move) "已剪切，进入目标文件夹后点击粘贴" else "已复制，进入目标文件夹后点击粘贴") }
+    private fun copy(move: Boolean) {
+        clipboardItems = chosenAll()
+        if (clipboardItems.isEmpty()) { toast("请先选择项目"); return }
+        cut = move
+        toast("已${if (move) "剪切" else "复制"} ${clipboardItems.size} 项，进入目标文件夹后点击粘贴")
+    }
     private fun paste() {
-        val source = clipboard ?: run { toast("剪贴板为空"); return }
+        val sources = clipboardItems
+        if (sources.isEmpty()) { toast("剪贴板为空"); return }
         val dest = current ?: return
-        if (source == dest || (isDir(source) && DocumentsContract.getDocumentId(dest).startsWith(DocumentsContract.getDocumentId(source) + "/"))) { toast("不能粘贴到自身或子文件夹"); return }
+        for (source in sources) {
+            if (source == dest || (isDir(source) && DocumentsContract.getDocumentId(dest).startsWith(DocumentsContract.getDocumentId(source) + "/"))) { toast("不能粘贴到自身或子文件夹"); return }
+        }
         operation {
-            copyRecursive(source, dest, 0)
-            if (cut) { if (!DocumentsContract.deleteDocument(contentResolver, source)) throw IOException("复制完成，但删除原文件失败") ; clipboard = null }
+            for (source in sources) {
+                copyRecursive(source, dest, 0)
+                if (cut && !DocumentsContract.deleteDocument(contentResolver, source)) throw IOException("复制完成，但删除原文件失败")
+            }
+            if (cut) clipboardItems = emptyList()
+            multi.clear()
         }
     }
     private fun uniqueName(parent: Uri, wanted: String): String {
@@ -232,15 +320,16 @@ class MainActivity : Activity() {
         else contentResolver.openInputStream(src).use { input -> contentResolver.openOutputStream(target, "w").use { output -> if (input == null || output == null) throw IOException("无法读写 ${m.name}"); input.copyTo(output) } }
     }
     private fun compress() {
-        val src = chosen() ?: return
+        val sources = chosenAll()
+        if (sources.isEmpty()) { toast("请先选择项目"); return }
         val parent = current ?: return
         operation {
-            val name = uniqueName(parent, queryName(src).substringBeforeLast('.', queryName(src)) + ".zip")
+            val name = uniqueName(parent, if (sources.size == 1) queryName(sources[0]).substringBeforeLast('.', queryName(sources[0])) + ".zip" else "Archive.zip")
             val output = DocumentsContract.createDocument(contentResolver, parent, "application/zip", name) ?: throw IOException("无法创建 ZIP")
             try {
                 contentResolver.openOutputStream(output, "w").use { raw ->
                     if (raw == null) throw IOException("无法写入 ZIP")
-                    ZipOutputStream(BufferedOutputStream(raw)).use { zip -> addZip(src, "", zip, 0) }
+                    ZipOutputStream(BufferedOutputStream(raw)).use { zip -> sources.forEach { addZip(it, "", zip, 0) } }
                 }
             } catch (e: Exception) { DocumentsContract.deleteDocument(contentResolver, output); throw e }
         }
