@@ -33,17 +33,7 @@ class MainActivity : Activity() {
     private var multiMode = false
     private var refreshToken = 0
     private var rowCache: List<Pair<Uri, Info>> = emptyList()
-    private val multi = linkedSetOf<Uri>()
-    private var multiMode = false
-    private var refreshToken = 0
-    private var rowCache: List<Pair<Uri, Info>> = emptyList()
-    private val multi = linkedSetOf<Uri>()
-    private var multiMode = false
-    private var refreshToken = 0
-    private var rowCache: List<Pair<Uri, Info>> = emptyList()
     private var clipboard: Uri? = null
-    private var clipboardItems: List<Uri> = emptyList()
-    private var clipboardItems: List<Uri> = emptyList()
     private var clipboardItems: List<Uri> = emptyList()
     private var cut = false
     private var sortMode = 0
@@ -92,8 +82,6 @@ class MainActivity : Activity() {
         }
         root.addView(search)
         root.addView(horizontal(button("排序：名称/大小/日期") { sortMode = (sortMode + 1) % 3; showEntries() }, button("新建文件夹") { prompt("文件夹名称") { name -> operation { createFolder(name) } } }))
-        root.addView(horizontal(button("多选 / 完成") { multiMode = !multiMode; if (!multiMode) multi.clear(); showEntries(); updateSelectionStatus() }, button("全选") { multiMode = true; multi.addAll(rowCache.filter { it.second.name.contains(search.text.toString(), true) }.map { it.first }); showEntries(); updateSelectionStatus() }, button("清空选择") { multi.clear(); selected = null; showEntries(); updateSelectionStatus() }))
-        root.addView(horizontal(button("多选 / 完成") { multiMode = !multiMode; if (!multiMode) multi.clear(); showEntries(); updateSelectionStatus() }, button("全选") { multiMode = true; multi.addAll(rowCache.filter { it.second.name.contains(search.text.toString(), true) }.map { it.first }); showEntries(); updateSelectionStatus() }, button("清空选择") { multi.clear(); selected = null; showEntries(); updateSelectionStatus() }))
         root.addView(horizontal(button("多选 / 完成") { multiMode = !multiMode; if (!multiMode) multi.clear(); showEntries(); updateSelectionStatus() }, button("全选") { multiMode = true; multi.addAll(rowCache.filter { it.second.name.contains(search.text.toString(), true) }.map { it.first }); showEntries(); updateSelectionStatus() }, button("清空选择") { multi.clear(); selected = null; showEntries(); updateSelectionStatus() }))
         val scroll = ScrollView(this).apply { isFillViewport = true }
         list = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(0, dp(4), 0, dp(8)) }
